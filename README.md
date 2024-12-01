@@ -32,12 +32,14 @@ config :ai_sdk, :openai_api_key, "your-api-key"
 
 ## Usage
 
-### Streaming Completions
+### Chat Models
 
 ```elixir
-prompt = "Tell me a story about a brave knight"
+# Simple chat completion
+{:ok, response} = Ai.Providers.OpenAI.chat("What is the capital of France?")
 
-Ai.Providers.OpenAI.stream(prompt)
+# Streaming chat completion
+Ai.Providers.OpenAI.chat("Tell me a story", %{stream: true})
 |> Stream.map(fn chunk -> 
   chunk.choices
   |> Enum.map(& &1.delta.content)
@@ -45,22 +47,8 @@ Ai.Providers.OpenAI.stream(prompt)
 end)
 |> Stream.each(&IO.write/1)
 |> Stream.run()
-```
 
-### Regular Completions
-
-```elixir
-prompt = "What is the capital of France?"
-
-{:ok, response} = Ai.Providers.OpenAI.complete(prompt)
-IO.puts(response.choices |> Enum.at(0) |> Map.get(:message) |> Map.get(:content))
-```
-
-### Chat Messages
-
-You can also pass a list of messages for a chat-like interaction:
-
-```elixir
+# Chat with history
 messages = [
   %{role: "system", content: "You are a helpful assistant."},
   %{role: "user", content: "What's the weather like?"},
@@ -68,7 +56,43 @@ messages = [
   %{role: "user", content: "What can you help me with then?"}
 ]
 
-Ai.Providers.OpenAI.stream(messages)
+Ai.Providers.OpenAI.chat(messages, %{
+  model: "gpt-4",
+  temperature: 0.7
+})
+
+# Function calling
+functions = [
+  %{
+    name: "get_weather",
+    description: "Get the current weather in a location",
+    parameters: %{
+      type: "object",
+      properties: %{
+        location: %{
+          type: "string",
+          description: "The city and state, e.g., San Francisco, CA"
+        }
+      },
+      required: ["location"]
+    }
+  }
+]
+
+Ai.Providers.OpenAI.chat("What's the weather in San Francisco?", %{
+  functions: functions,
+  function_call: "auto"
+})
+```
+
+### Completion Models
+
+```elixir
+# Simple completion
+{:ok, response} = Ai.Providers.OpenAI.completion("Complete this: The quick brown fox")
+
+# Streaming completion
+Ai.Providers.OpenAI.completion("Tell me a story", %{stream: true})
 |> Stream.map(fn chunk -> 
   chunk.choices
   |> Enum.map(& &1.delta.content)
@@ -76,24 +100,42 @@ Ai.Providers.OpenAI.stream(messages)
 end)
 |> Stream.each(&IO.write/1)
 |> Stream.run()
+
+# Completion with options
+options = %{
+  model: "gpt-3.5-turbo-instruct",
+  temperature: 0.7,
+  max_tokens: 100,
+  echo: true,
+  suffix: "over the lazy dog"
+}
+
+Ai.Providers.OpenAI.completion("The quick brown fox", options)
 ```
 
 ### Configuration Options
 
-You can pass various options to customize the completion:
+#### Common Options
+- `:model` - The model to use (default varies by endpoint)
+- `:temperature` - Controls randomness (0-1)
+- `:max_tokens` - Maximum tokens in the response
+- `:top_p` - Controls diversity via nucleus sampling
+- `:frequency_penalty` - Decreases likelihood of repeating tokens
+- `:presence_penalty` - Increases likelihood of new topics
+- `:stop` - Sequences where the API will stop generating
+- `:stream` - Whether to stream the response
 
-```elixir
-options = %{
-  model: "gpt-4",
-  temperature: 0.7,
-  max_tokens: 100,
-  top_p: 1,
-  frequency_penalty: 0,
-  presence_penalty: 0
-}
+#### Chat-Specific Options
+- `:functions` - List of functions the model may call
+- `:function_call` - Controls function calling behavior
 
-Ai.Providers.OpenAI.complete("Your prompt", options)
-```
+#### Completion-Specific Options
+- `:echo` - Echo back the prompt in addition to the completion
+- `:suffix` - Text to append to the completion
+- `:logit_bias` - Modify likelihood of specific tokens
+
+#### Stream Options
+- `:chunk_timeout` - Timeout for receiving chunks (default: 10000ms)
 
 ## Contributing
 

@@ -4,21 +4,44 @@ defmodule Ai do
   It provides streaming support and easy integration with various AI providers.
   """
 
-  @type completion_options :: %{
+  @type message :: %{
+          role: String.t(),
+          content: String.t(),
+          name: String.t() | nil,
+          function_call: map() | nil
+        }
+
+  @type common_options :: %{
           optional(:model) => String.t(),
           optional(:temperature) => float(),
           optional(:max_tokens) => pos_integer(),
           optional(:top_p) => float(),
           optional(:frequency_penalty) => float(),
           optional(:presence_penalty) => float(),
-          optional(:stop) => String.t() | [String.t()]
+          optional(:stop) => String.t() | [String.t()],
+          optional(:stream) => boolean()
         }
+
+  @type chat_options ::
+          common_options()
+          | %{
+              optional(:functions) => [map()],
+              optional(:function_call) => String.t() | map()
+            }
+
+  @type completion_options ::
+          common_options()
+          | %{
+              optional(:echo) => boolean(),
+              optional(:suffix) => String.t(),
+              optional(:logit_bias) => map()
+            }
 
   @type stream_options :: %{
           optional(:chunk_timeout) => pos_integer()
         }
 
-  @type completion_chunk :: %{
+  @type chunk :: %{
           id: String.t(),
           model: String.t(),
           choices: [
@@ -34,22 +57,30 @@ defmodule Ai do
           ]
         }
 
-  @doc """
-  Streams a completion from the AI provider.
-  Returns a stream of completion chunks.
-  """
-  @callback stream(
-              prompt :: String.t() | [map()],
-              completion_options(),
-              stream_options()
-            ) :: Enumerable.t()
+  @type response :: %{
+          id: String.t(),
+          model: String.t(),
+          choices: [map()],
+          usage: map()
+        }
 
   @doc """
-  Completes a prompt with the AI provider.
-  Returns the full completion response.
+  Sends a chat request to the AI provider.
+  Returns either a stream of chunks or a complete response depending on the :stream option.
   """
-  @callback complete(
-              prompt :: String.t() | [map()],
-              completion_options()
-            ) :: {:ok, map()} | {:error, term()}
+  @callback chat(
+              prompt :: String.t() | [message()],
+              chat_options(),
+              stream_options()
+            ) :: Enumerable.t() | {:ok, response()} | {:error, term()}
+
+  @doc """
+  Sends a completion request to the AI provider.
+  Returns either a stream of chunks or a complete response depending on the :stream option.
+  """
+  @callback completion(
+              prompt :: String.t(),
+              completion_options(),
+              stream_options()
+            ) :: Enumerable.t() | {:ok, response()} | {:error, term()}
 end

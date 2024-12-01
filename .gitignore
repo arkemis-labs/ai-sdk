@@ -27,3 +27,5 @@ ai-*.tar
 
 
 .env
+
+.elixir_ls
