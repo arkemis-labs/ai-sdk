@@ -83,8 +83,11 @@ defmodule Ai.Providers.OpenAI do
       |> Map.merge(%{
         model: model,
         messages: format_chat_prompt(prompt),
-        stream: true
+        stream: true,
+        functions: Map.get(options, :functions),
+        function_call: Map.get(options, :function_call)
       })
+      |> Map.reject(fn {_, v} -> is_nil(v) end)
       |> Jason.encode!()
 
     request = Finch.build(:post, "#{@base_url}/chat/completions", headers(), body)
@@ -124,16 +127,50 @@ defmodule Ai.Providers.OpenAI do
   defp complete_chat(prompt, options) do
     model = Map.get(options, :model, @default_chat_model)
 
-    body =
+    {api_functions, callbacks} =
       options
-      |> Map.merge(%{
-        model: model,
-        messages: format_chat_prompt(prompt)
-      })
+      |> Map.get(:functions, [])
+      |> prepare_functions()
+
+    body = %{
+      model: model,
+      messages: format_chat_prompt(prompt)
+    }
+
+    body =
+      if Enum.empty?(api_functions) do
+        body
+      else
+        body
+        |> Map.put(:functions, api_functions)
+        |> Map.put(:function_call, Map.get(options, :function_call))
+      end
+
+    body =
+      body
+      |> Map.merge(
+        Map.take(options, [
+          :temperature,
+          :max_tokens,
+          :top_p,
+          :frequency_penalty,
+          :presence_penalty,
+          :stop,
+          :stream
+        ])
+      )
+      |> Map.reject(fn {_, v} -> is_nil(v) end)
       |> Jason.encode!()
 
     request = Finch.build(:post, "#{@base_url}/chat/completions", headers(), body)
-    make_request(request)
+
+    with {:ok, response} <- make_request(request),
+         choice when not is_nil(choice) <- List.first(response.choices),
+         true <- choice.finish_reason == "function_call" do
+      execute_function_call(response, api_functions, callbacks)
+    else
+      _ -> make_request(request)
+    end
   end
 
   defp complete_completion(prompt, options) do
@@ -243,4 +280,64 @@ defmodule Ai.Providers.OpenAI do
       key -> key
     end
   end
+
+  defp prepare_functions(functions) do
+    functions
+    |> Enum.map(fn function ->
+      {callback, api_function} = Map.pop(function, :callback)
+      {api_function, callback}
+    end)
+    |> Enum.reduce({[], %{}}, fn {api_function, callback}, {api_functions, callbacks} ->
+      new_callbacks =
+        if callback do
+          Map.put(callbacks, api_function.name, callback)
+        else
+          callbacks
+        end
+
+      {[api_function | api_functions], new_callbacks}
+    end)
+  end
+
+  defp execute_function_call(
+         %{choices: [%{message: %{function_call: %{name: name, arguments: arguments}}} | _]} =
+           response,
+         functions,
+         callbacks
+       ) do
+    case Map.get(callbacks, name) do
+      nil ->
+        {:ok, response}
+
+      callback ->
+        args = Jason.decode!(arguments)
+        result = callback.(args)
+
+        # Add function result to messages and make another API call
+        messages = [
+          # Include the assistant's function call
+          %{
+            role: "assistant",
+            content: nil,
+            function_call: %{
+              name: name,
+              arguments: arguments
+            }
+          },
+          # Include the function response
+          %{
+            role: "function",
+            name: name,
+            content: Jason.encode!(result)
+          }
+        ]
+
+        complete_chat(messages, %{
+          model: response.model,
+          functions: functions
+        })
+    end
+  end
+
+  defp execute_function_call(response, _functions, _callbacks), do: {:ok, response}
 end
