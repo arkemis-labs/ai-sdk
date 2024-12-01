@@ -64,6 +64,12 @@ defmodule Ai do
           usage: map()
         }
 
+  @type generate_text_options :: common_options()
+
+  @type generate_structured_options :: common_options()
+
+  @type json_schema :: map()
+
   @doc """
   Sends a chat request to the AI provider.
   Returns either a stream of chunks or a complete response depending on the :stream option.
@@ -83,4 +89,23 @@ defmodule Ai do
               completion_options(),
               stream_options()
             ) :: Enumerable.t() | {:ok, response()} | {:error, term()}
+
+  @doc """
+  Generates text using the AI provider.
+  Returns just the generated text content without the full API response structure.
+  """
+  @callback generate_text(
+              prompt :: String.t(),
+              options :: generate_text_options()
+            ) :: {:ok, String.t()} | {:error, term()}
+
+  @doc """
+  Generates structured data from text using the AI provider based on a provided JSON schema.
+  Returns a parsed object that matches the schema structure.
+  """
+  @callback generate_structured(
+              prompt :: String.t(),
+              schema :: json_schema(),
+              options :: generate_structured_options()
+            ) :: {:ok, map()} | {:error, term()}
 end

@@ -85,6 +85,69 @@ Ai.Providers.OpenAI.chat("What's the weather in San Francisco?", %{
 })
 ```
 
+### Text Generation
+
+```elixir
+# Simple text generation
+{:ok, text} = Ai.Providers.OpenAI.generate_text("Explain quantum computing in simple terms", %{
+  temperature: 0.7,
+  max_tokens: 150
+})
+
+# Text generation with different model
+{:ok, text} = Ai.Providers.OpenAI.generate_text(
+  "Write a haiku about programming",
+  %{
+    model: "gpt-4",
+    temperature: 0.9
+  }
+)
+```
+
+### Structured Data Generation
+
+```elixir
+# Define a schema for the response structure
+schema = %{
+  "type" => "object",
+  "properties" => %{
+    "title" => %{"type" => "string"},
+    "summary" => %{"type" => "string"},
+    "key_points" => %{
+      "type" => "array",
+      "items" => %{"type" => "string"}
+    },
+    "difficulty" => %{
+      "type" => "string",
+      "enum" => ["beginner", "intermediate", "advanced"]
+    }
+  },
+  "required" => ["title", "summary", "key_points", "difficulty"]
+}
+
+# Generate structured data from text
+{:ok, article_analysis} = Ai.Providers.OpenAI.generate_structured(
+  "Analyze this article about machine learning basics",
+  schema,
+  %{
+    temperature: 0.7,
+    model: "gpt-4"
+  }
+)
+
+# The result will be a structured map matching the schema
+%{
+  "title" => "Introduction to Machine Learning",
+  "summary" => "A comprehensive overview of ML fundamentals...",
+  "key_points" => [
+    "Data preprocessing is crucial",
+    "Different types of learning algorithms",
+    "Model evaluation techniques"
+  ],
+  "difficulty" => "beginner"
+}
+```
+
 ### Completion Models
 
 ```elixir

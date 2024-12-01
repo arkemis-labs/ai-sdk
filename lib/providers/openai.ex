@@ -36,6 +36,44 @@ defmodule Ai.Providers.OpenAI do
     end
   end
 
+  @spec generate_text(String.t(), map()) :: {:ok, String.t()} | {:error, map()}
+  def generate_text(prompt, options \\ %{}) do
+    case chat(prompt, options) do
+      {:ok, response} ->
+        text = get_in(response, [:choices, Access.at(0), :message, :content])
+        {:ok, text}
+
+      error ->
+        error
+    end
+  end
+
+  @spec generate_structured(String.t(), map(), map()) :: {:ok, map()} | {:error, map()}
+  def generate_structured(prompt, schema, options \\ %{}) do
+    system_prompt = """
+    You are a structured data extractor. Your response must be valid JSON that matches this schema:
+    #{Jason.encode!(schema)}
+    """
+
+    messages = [
+      %{role: "system", content: system_prompt},
+      %{role: "user", content: prompt}
+    ]
+
+    case chat(messages, options) do
+      {:ok, response} ->
+        content = get_in(response, [:choices, Access.at(0), :message, :content])
+
+        case Jason.decode(content) do
+          {:ok, parsed} -> {:ok, parsed}
+          {:error, _} -> {:error, %{error: "Failed to parse JSON response"}}
+        end
+
+      error ->
+        error
+    end
+  end
+
   defp stream_chat(prompt, options, stream_options) do
     model = Map.get(options, :model, @default_chat_model)
     chunk_timeout = Map.get(stream_options, :chunk_timeout, @default_chunk_timeout)
