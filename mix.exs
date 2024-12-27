@@ -27,10 +27,11 @@ defmodule Ai.MixProject do
   defp deps do
     [
       {:jason, "~> 1.4"},
-      {:finch, "~> 0.19"},
+      {:req, "~> 0.5.0"},
       {:ex_doc, "~> 0.30", only: :dev, runtime: false},
       {:dialyxir, "~> 1.3", only: [:dev], runtime: false},
-      {:credo, "~> 1.7", only: [:dev, :test], runtime: false}
+      {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
+      {:server_sent_events, "~> 0.2.0"}
     ]
   end
 

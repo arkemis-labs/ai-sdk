@@ -6,16 +6,20 @@ defmodule Ai.Providers.OpenAI do
   @default_completion_model "gpt-3.5-turbo-instruct"
   @default_chunk_timeout 10_000
 
-  @spec chat(binary() | maybe_improper_list()) ::
-          ({:cont, any()} | {:halt, any()} | {:suspend, any()}, any() ->
-             {:halted, any()} | {:suspended, any(), (any() -> any())})
-          | {:error,
-             %{
-               optional(:__exception__) => true,
-               optional(:__struct__) => atom(),
-               optional(atom()) => any()
-             }}
-          | {:ok, any()}
+  @type api_function :: %{
+          name: String.t(),
+          description: String.t(),
+          parameters: map()
+        }
+
+  @type function_callback :: (map() -> term())
+  @type function_callbacks :: %{String.t() => function_callback()}
+
+  @spec chat(
+          String.t() | [Ai.message()],
+          Ai.chat_options(),
+          Ai.stream_options()
+        ) :: Enumerable.t() | {:ok, Ai.response()} | {:error, term()}
   def chat(prompt, options \\ %{}, stream_options \\ %{}) do
     stream? = Map.get(options, :stream, false)
 
@@ -26,6 +30,11 @@ defmodule Ai.Providers.OpenAI do
     end
   end
 
+  @spec completion(
+          String.t(),
+          Ai.completion_options(),
+          Ai.stream_options()
+        ) :: Enumerable.t() | {:ok, Ai.response()} | {:error, term()}
   def completion(prompt, options \\ %{}, stream_options \\ %{}) do
     stream? = Map.get(options, :stream, false)
 
@@ -74,56 +83,80 @@ defmodule Ai.Providers.OpenAI do
     end
   end
 
+  @spec stream_chat(String.t() | [Ai.message()], Ai.chat_options(), Ai.stream_options()) ::
+          Enumerable.t()
   defp stream_chat(prompt, options, stream_options) do
     model = Map.get(options, :model, @default_chat_model)
     chunk_timeout = Map.get(stream_options, :chunk_timeout, @default_chunk_timeout)
 
-    body =
-      options
-      |> Map.merge(%{
-        model: model,
-        messages: format_chat_prompt(prompt),
-        stream: true,
-        functions: Map.get(options, :functions),
-        function_call: Map.get(options, :function_call)
-      })
-      |> Map.reject(fn {_, v} -> is_nil(v) end)
-      |> Jason.encode!()
-
-    request = Finch.build(:post, "#{@base_url}/chat/completions", headers(), body)
-
-    Stream.resource(
-      fn -> start_stream(request, chunk_timeout) end,
-      &process_stream/1,
-      fn _ -> :ok end
-    )
+    body = prepare_stream_chat_body(model, prompt, options)
+    handle_stream("#{@base_url}/chat/completions", body, chunk_timeout)
   end
 
+  @spec stream_completion(String.t(), Ai.completion_options(), Ai.stream_options()) ::
+          Enumerable.t()
   defp stream_completion(prompt, options, stream_options) do
     model = Map.get(options, :model, @default_completion_model)
     chunk_timeout = Map.get(stream_options, :chunk_timeout, @default_chunk_timeout)
 
-    body =
-      options
-      |> Map.merge(%{
-        model: model,
-        prompt: prompt,
-        stream: true,
-        echo: Map.get(options, :echo, false),
-        logit_bias: Map.get(options, :logit_bias, %{}),
-        suffix: Map.get(options, :suffix, nil)
-      })
-      |> Jason.encode!()
-
-    request = Finch.build(:post, "#{@base_url}/completions", headers(), body)
-
-    Stream.resource(
-      fn -> start_stream(request, chunk_timeout) end,
-      &process_stream/1,
-      fn _ -> :ok end
-    )
+    body = prepare_stream_completion_body(model, prompt, options)
+    handle_stream("#{@base_url}/completions", body, chunk_timeout)
   end
 
+  @spec prepare_stream_chat_body(String.t(), String.t() | [Ai.message()], map()) :: String.t()
+  defp prepare_stream_chat_body(model, prompt, options) do
+    %{
+      model: model,
+      messages: format_chat_prompt(prompt),
+      stream: true,
+      functions: Map.get(options, :functions),
+      function_call: Map.get(options, :function_call)
+    }
+    |> Map.reject(fn {_, v} -> is_nil(v) end)
+    |> Jason.encode!()
+  end
+
+  @spec prepare_stream_completion_body(String.t(), String.t(), map()) :: String.t()
+  defp prepare_stream_completion_body(model, prompt, options) do
+    %{
+      model: model,
+      prompt: prompt,
+      stream: true,
+      echo: Map.get(options, :echo, false),
+      logit_bias: Map.get(options, :logit_bias, %{}),
+      suffix: Map.get(options, :suffix, nil)
+    }
+    |> Jason.encode!()
+  end
+
+  @spec handle_stream(String.t(), String.t(), pos_integer()) :: Enumerable.t()
+  defp handle_stream(url, body, chunk_timeout) do
+    Req.post!(url,
+      headers: headers(),
+      body: body,
+      receive_timeout: chunk_timeout,
+      into: :self
+    )
+    |> Map.fetch!(:body)
+    |> Stream.transform("", fn
+      data, buffer when is_binary(data) ->
+        {events, buffer} = ServerSentEvents.parse(buffer <> data)
+
+        chunks =
+          events
+          |> Enum.map(&process_event/1)
+          |> Enum.reject(&is_nil/1)
+          |> Enum.map(&format_chunk/1)
+
+        {chunks, buffer}
+
+      :done, acc ->
+        {:halt, acc}
+    end)
+  end
+
+  @spec complete_chat(String.t() | [Ai.message()], Ai.chat_options()) ::
+          {:ok, Ai.response()} | {:error, term()}
   defp complete_chat(prompt, options) do
     model = Map.get(options, :model, @default_chat_model)
 
@@ -132,115 +165,100 @@ defmodule Ai.Providers.OpenAI do
       |> Map.get(:functions, [])
       |> prepare_functions()
 
-    body = %{
-      model: model,
-      messages: format_chat_prompt(prompt)
-    }
-
     body =
-      if Enum.empty?(api_functions) do
-        body
-      else
-        body
-        |> Map.put(:functions, api_functions)
-        |> Map.put(:function_call, Map.get(options, :function_call))
-      end
-
-    body =
-      body
-      |> Map.merge(
-        Map.take(options, [
-          :temperature,
-          :max_tokens,
-          :top_p,
-          :frequency_penalty,
-          :presence_penalty,
-          :stop,
-          :stream
-        ])
-      )
-      |> Map.reject(fn {_, v} -> is_nil(v) end)
+      prepare_chat_body(model, prompt, api_functions, options)
+      |> Map.merge(prepare_request_body(options))
       |> Jason.encode!()
 
-    request = Finch.build(:post, "#{@base_url}/chat/completions", headers(), body)
+    url = "#{@base_url}/chat/completions"
 
-    with {:ok, response} <- make_request(request),
-         choice when not is_nil(choice) <- List.first(response.choices),
-         true <- choice.finish_reason == "function_call" do
+    with {:ok, response} <- make_request(url, body),
+         choice when not is_nil(choice) <- List.first(response["choices"]),
+         true <- choice["finish_reason"] == "function_call" do
       execute_function_call(response, api_functions, callbacks)
     else
-      _ -> make_request(request)
+      _ -> make_request(url, body)
     end
   end
 
+  @spec complete_completion(String.t(), Ai.completion_options()) ::
+          {:ok, Ai.response()} | {:error, term()}
   defp complete_completion(prompt, options) do
     model = Map.get(options, :model, @default_completion_model)
 
     body =
-      options
-      |> Map.merge(%{
+      %{
         model: model,
         prompt: prompt,
         echo: Map.get(options, :echo, false),
         logit_bias: Map.get(options, :logit_bias, %{}),
         suffix: Map.get(options, :suffix, nil)
-      })
+      }
+      |> Map.merge(prepare_request_body(options))
       |> Jason.encode!()
 
-    request = Finch.build(:post, "#{@base_url}/completions", headers(), body)
-    make_request(request)
+    url = "#{@base_url}/completions"
+    make_request(url, body)
   end
 
-  defp start_stream(request, chunk_timeout) do
-    case Finch.request(request, AiFinch, receive_timeout: chunk_timeout) do
-      {:ok, %{status: 200} = resp} ->
-        {:ok, resp.body |> String.split("\n", trim: true)}
+  @spec prepare_chat_body(String.t(), String.t() | [Ai.message()], [api_function()], map()) ::
+          map()
+  defp prepare_chat_body(model, prompt, api_functions, options) do
+    body = %{
+      model: model,
+      messages: format_chat_prompt(prompt)
+    }
 
-      {:ok, %{status: status}} ->
-        {:error, "Unexpected status: #{status}"}
-
-      {:error, error} ->
-        {:error, error}
+    if Enum.empty?(api_functions) do
+      body
+    else
+      body
+      |> Map.put(:functions, api_functions)
+      |> Map.put(:function_call, Map.get(options, :function_call))
     end
   end
 
-  defp process_stream({:error, error}), do: {:halt, error}
-  defp process_stream({:ok, []}), do: {:halt, :done}
-
-  defp process_stream({:ok, [line | rest]}) do
-    case process_line(line) do
-      nil -> {[], {:ok, rest}}
-      chunk -> {[format_chunk(chunk)], {:ok, rest}}
-    end
+  @spec prepare_request_body(map()) :: map()
+  defp prepare_request_body(options) do
+    options
+    |> Map.take([
+      :temperature,
+      :max_tokens,
+      :top_p,
+      :frequency_penalty,
+      :presence_penalty,
+      :stop,
+      :stream
+    ])
+    |> Map.reject(fn {_, v} -> is_nil(v) end)
   end
 
-  defp make_request(request) do
-    case Finch.request(request, AiFinch) do
-      {:ok, %Finch.Response{status: 200, body: body}} ->
-        {:ok, Jason.decode!(body, keys: :atoms)}
+  @spec make_request(String.t(), String.t()) :: {:ok, map()} | {:error, term()}
+  defp make_request(url, body) do
+    case Req.post!(url, headers: headers(), body: body) do
+      %{status: 200, body: body} ->
+        {:ok, body}
 
-      {:ok, %Finch.Response{status: status, body: body}} ->
-        {:error, %{status: status, body: Jason.decode!(body)}}
-
-      {:error, exception} ->
-        {:error, exception}
+      %{status: status, body: body} ->
+        {:error, %{status: status, body: body}}
     end
+  rescue
+    e -> {:error, e}
   end
 
+  @spec format_chat_prompt(String.t() | [Ai.message()]) :: [Ai.message()]
   defp format_chat_prompt(prompt) when is_binary(prompt) do
     [%{role: "user", content: prompt}]
   end
 
   defp format_chat_prompt(messages) when is_list(messages), do: messages
 
-  defp process_line(line) do
-    case String.trim(line) do
-      "data: [DONE]" -> nil
-      "data: " <> content -> parse_chunk(content)
-      _ -> nil
-    end
-  end
+  @spec process_event(ServerSentEvents.event()) :: map() | nil
+  defp process_event(%{data: "[DONE]"}), do: nil
+  defp process_event(%{data: data}), do: parse_chunk(data)
+  defp process_event(_), do: nil
 
+  @spec parse_chunk(String.t()) :: map() | nil
   defp parse_chunk(content) do
     case Jason.decode(content, keys: :atoms) do
       {:ok, chunk} -> chunk
@@ -248,6 +266,7 @@ defmodule Ai.Providers.OpenAI do
     end
   end
 
+  @spec format_chunk(map()) :: Ai.chunk()
   defp format_chunk(chunk) do
     %{
       id: chunk.id,
@@ -267,6 +286,7 @@ defmodule Ai.Providers.OpenAI do
     }
   end
 
+  @spec headers() :: [{String.t(), String.t()}]
   defp headers do
     [
       {"Content-Type", "application/json"},
@@ -274,6 +294,7 @@ defmodule Ai.Providers.OpenAI do
     ]
   end
 
+  @spec get_api_key!() :: String.t()
   defp get_api_key! do
     case Application.get_env(:ai_sdk, :openai_api_key) || System.get_env("OPENAI_API_KEY") do
       nil -> raise "OpenAI API key not found in config or environment variables"
@@ -281,6 +302,7 @@ defmodule Ai.Providers.OpenAI do
     end
   end
 
+  @spec prepare_functions([map()]) :: {[api_function()], function_callbacks()}
   defp prepare_functions(functions) do
     functions
     |> Enum.map(fn function ->
@@ -299,6 +321,8 @@ defmodule Ai.Providers.OpenAI do
     end)
   end
 
+  @spec execute_function_call(map(), [api_function()], function_callbacks()) ::
+          {:ok, Ai.response()} | {:error, term()}
   defp execute_function_call(
          %{choices: [%{message: %{function_call: %{name: name, arguments: arguments}}} | _]} =
            response,
